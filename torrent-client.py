@@ -24,11 +24,8 @@ def decodePeers(peers):
 def interested(bitfield, downloaded_pieces):
     for i in range(len(downloaded_pieces)):
         bit = bitfield[i] - downloaded_pieces[i]
-        bitfield[i] = bit if bit > 0 else 0
-    if sum(bitfield) > 0:
-        return True
-    else:
-        return False
+        bitfield[i] = max(bit, 0)
+    return sum(bitfield) > 0
 
 
 def sendPieceNumb(peer_socket, index, length, begin=0):
@@ -44,12 +41,10 @@ def connectTracker(dict_hash, peer_id):
                    'port': 6968, 'evented': 'started',
                    'uploaded': '0', 'downloaded': '0', 'left': str(full_length), 'compact': '1', 'numwant': '100'}
 
-        full_url = "{}?{}".format(announce, parse.urlencode(payload))
+        full_url = f"{announce}?{parse.urlencode(payload)}"
         req = request.Request(full_url)
         req.method = "GET"
-        http_resp = request.urlopen(req)
-
-        if http_resp:
+        if http_resp := request.urlopen(req):
             resp = http_resp.read()
             if b'failure reason' not in resp:
                 answer_dict = bencodepy.decode(resp)
@@ -66,8 +61,8 @@ def connectTracker(dict_hash, peer_id):
 def checkPartialTorrent():
     numb_pieces = len(pieces)
     piece_length = torrent_dict[b'info'][b'piece length']
-    if os.path.exists(saveDirectory + "/" + file):
-        with open(saveDirectory + "/" + file, "r+b") as cur_file:
+    if os.path.exists(f"{saveDirectory}/{file}"):
+        with open(f"{saveDirectory}/{file}", "r+b") as cur_file:
             for i in range(numb_pieces):
                 cur_file.seek(i * piece_length)
                 piece = cur_file.read(piece_length)
@@ -95,7 +90,7 @@ def sendRequest(bitfield, peer_socket, my_pieces):
 def writeBlockInFile(block, index, begin):
     new_bytes = len(block)
     begin = torrent_dict[b'info'][b'piece length'] * index
-    with open(saveDirectory + "/" + file, "r+b") as cur_file:
+    with open(f"{saveDirectory}/{file}", "r+b") as cur_file:
         cur_file.seek(begin)
         cur_file.write(block)
     with lock:
@@ -118,11 +113,10 @@ def unpackPiece(raw_data, my_pieces, peer_socket, bitfield):
             lock.release()
             if computeHash(my_pieces[index]) == pieces[index]:
                 writeBlockInFile(my_pieces[index], index, begin)
-                if sum(downloaded_pieces) != len(pieces):
-                    sendRequest(bitfield, peer_socket, my_pieces)
-                    return False
-                else:
+                if sum(downloaded_pieces) == len(pieces):
                     return True
+                sendRequest(bitfield, peer_socket, my_pieces)
+                return False
             else:
                 with pieces_lock:
                     downloaded_pieces[index] = 0
@@ -147,7 +141,7 @@ def unpackPiece(raw_data, my_pieces, peer_socket, bitfield):
 
 def processData(raw_data, bitfield, my_pieces, peer_socket):
     try:
-        if 5 == struct.unpack('!B', raw_data[:1])[0]:
+        if struct.unpack('!B', raw_data[:1])[0] == 5:
             bitfield += map(lambda x: int(x), list(bitstring.BitArray(raw_data[1:]).bin))
             with pieces_lock:
                 if interested(bitfield, downloaded_pieces):
@@ -158,20 +152,20 @@ def processData(raw_data, bitfield, my_pieces, peer_socket):
                     peer_socket.sendall(data)
                     return True
 
-        if 4 == struct.unpack('!B', raw_data[:1])[0]:
+        if struct.unpack('!B', raw_data[:1])[0] == 4:
             piece_numb = struct.unpack('!I', raw_data[1:])[0]
             bitfield[piece_numb] = 1
             return False
 
-        if 1 == struct.unpack('!B', raw_data[:1])[0]:
+        if struct.unpack('!B', raw_data[:1])[0] == 1:
             if bitfield:
                 sendRequest(bitfield, peer_socket, my_pieces)
             return False
 
-        if 0 == struct.unpack('!B', raw_data[:1])[0]:
+        if struct.unpack('!B', raw_data[:1])[0] == 0:
             return True
 
-        if 7 == struct.unpack('!B', raw_data[:1])[0]:
+        if struct.unpack('!B', raw_data[:1])[0] == 7:
             return unpackPiece(raw_data[1:], my_pieces, peer_socket, bitfield)
 
         return False
@@ -220,8 +214,7 @@ def downloadData(peer_socket, peer):
                 msg_length -= len(raw_data)
 
             peer_socket.settimeout(None)
-            choked = processData(data, bitfield, my_pieces, peer_socket)
-            if choked:
+            if choked := processData(data, bitfield, my_pieces, peer_socket):
                 if sum(downloaded_pieces) != len(pieces):
                     restoreInfo(my_pieces)
 
@@ -249,8 +242,7 @@ def connectToPeer(peer):
         peer_socket.connect(peer)
         peer_socket.sendall(handshake)
         peer_socket.settimeout(5)
-        interested = peer_socket.recv(len(handshake))
-        if interested:
+        if interested := peer_socket.recv(len(handshake)):
             if dict_hash == struct.unpack('!20s', interested[28:48])[0]:
                 with lock:
                     connected_peers.append(peer)
@@ -260,7 +252,7 @@ def connectToPeer(peer):
             else:
                 peer_socket.close()
     except (socket.timeout, OSError):
-        text = "Timeout of connecting to " + str(peer)
+        text = f"Timeout of connecting to {str(peer)}"
         upd.message.reply_text(text)
     peer_socket.close()
     with lock:
@@ -269,40 +261,39 @@ def connectToPeer(peer):
 
 
 def download():
-    if sum(downloaded_pieces) != len(pieces):
-        upd.message.reply_text("\tConnecting to tracker")
-        peers_ips = connectTracker(dict_hash, peerId)
-        if len(peers_ips) > 0:
-            upd.message.reply_text("\tConnecting to peers")
-            global thread_i
-            while True:
-                try:
-                    lock.acquire()
-                    if thread_i < len(peers_ips) and len(connected_peers) < 10 and downloaded_bytes != full_length:
-                        lock.release()
-                        peer = peers_ips[thread_i]
-                        text = 'Trying connect to ' + str(peer)
-                        upd.message.reply_text(text)
-                        threading.Thread(target=connectToPeer, args=(peer,), daemon=True).start()
-                        thread_i += 1
-                        time.sleep(5)
-                    else:
-                        lock.release()
-                        if downloaded_bytes == full_length or thread_i == len(peers_ips):
-                            upd.bot.send_document(document=open(file, 'rb'))
-                            break
-                        time.sleep(5)
-                except:
-                    upd.message.reply_text("Downloading stopped")
-                    break
+    if sum(downloaded_pieces) == len(pieces):
+        return
+    upd.message.reply_text("\tConnecting to tracker")
+    peers_ips = connectTracker(dict_hash, peerId)
+    if len(peers_ips) > 0:
+        upd.message.reply_text("\tConnecting to peers")
+        global thread_i
+        while True:
+            try:
+                lock.acquire()
+                if thread_i < len(peers_ips) and len(connected_peers) < 10 and downloaded_bytes != full_length:
+                    lock.release()
+                    peer = peers_ips[thread_i]
+                    text = f'Trying connect to {str(peer)}'
+                    upd.message.reply_text(text)
+                    threading.Thread(target=connectToPeer, args=(peer,), daemon=True).start()
+                    thread_i += 1
+                else:
+                    lock.release()
+                    if downloaded_bytes == full_length or thread_i == len(peers_ips):
+                        upd.bot.send_document(document=open(file, 'rb'))
+                        break
+                time.sleep(5)
+            except:
+                upd.message.reply_text("Downloading stopped")
+                break
 
 
 def infoLogging():
     while True:
         time.sleep(logging_time)
         percent = (downloaded_bytes / full_length) * 100
-        if percent > 100:
-            percent = 100
+        percent = min(percent, 100)
         text = '\n' + "\tDownloaded: " + str(int(downloaded_bytes / 1000)) + "KB" + "\tPeers: " + str(len(connected_peers)) + " " + str(connected_peers) + "\t" + str(round(percent, 2)) + "% was downloaded" + "\n"
         upd.message.reply_text(text)
 
@@ -316,7 +307,13 @@ def downloading(torrent_file, update, log_time):
     upd = update
 
     torrent_dict = bencodepy.decode_from_file(torrent_file)
-    text = 'Name: ' + str(torrent_dict[b'info'][b'name']) + "\nLength: " + str(torrent_dict[b'info'][b'length']) + "\nURL: " + str(torrent_dict[b'announce'])
+    text = (
+        f"Name: {str(torrent_dict[b'info'][b'name'])}"
+        + "\nLength: "
+        + str(torrent_dict[b'info'][b'length'])
+        + "\nURL: "
+        + str(torrent_dict[b'announce'])
+    )
     update.message.reply_text(text)
     global dict_hash
     dict_hash = computeHash(bencodepy.encode(torrent_dict[b'info']))
@@ -331,8 +328,8 @@ def downloading(torrent_file, update, log_time):
     file = ()
 
     file = str(torrent_dict[b'info'][b'name'], 'utf-8')
-    if not os.path.exists(saveDirectory + "/" + file):
-        open(saveDirectory + "/" + file, "w+b")
+    if not os.path.exists(f"{saveDirectory}/{file}"):
+        open(f"{saveDirectory}/{file}", "w+b")
 
     global pieces
     pieces = [hashes[i:i + 20] for i in range(0, len(hashes), 20)]
